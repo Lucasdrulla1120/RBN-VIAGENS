@@ -223,7 +223,7 @@ def init_db():
     cur.execute("SELECT id FROM users WHERE email=?", ("admin@rbn.local",))
     if not cur.fetchone():
         cur.execute(
-            "INSERT INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
+            "INSERT OR IGNORE INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
             ("Administrador", "admin@rbn.local", "admin", generate_password_hash("admin123")),
         )
 
@@ -1022,7 +1022,7 @@ def admin_users():
         role = request.form.get('role','employee')
         password = request.form.get('password','123456')
         try:
-            conn.execute("INSERT INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
+            conn.execute("INSERT OR IGNORE INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
                          (name, email, role, generate_password_hash(password)))
             conn.commit()
             flash('Usuário criado.', 'success')
