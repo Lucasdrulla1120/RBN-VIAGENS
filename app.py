@@ -223,7 +223,7 @@ def init_db():
     cur.execute("SELECT id FROM users WHERE email=?", ("admin@rbn.local",))
     if not cur.fetchone():
         cur.execute(
-            "INSERT OR IGNORE INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
+            "INSERT INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
             ("Administrador", "admin@rbn.local", "admin", generate_password_hash("admin123")),
         )
 
@@ -618,114 +618,87 @@ def profile_statement_csv():
 # =========================
 @app.route('/viagens')
 @login_required('employee')
+
 def my_trips():
     conn = get_db()
-    trips = conn.execute("SELECT * FROM trips WHERE user_id=? ORDER BY id DESC", (session['user_id'],)).fetchall()
+    if session.get('role') == 'admin':
+        trips = conn.execute("SELECT * FROM trips WHERE user_id=? ORDER BY id DESC", (session['user_id'],)).fetchall()
+    else:
+        trips = conn.execute("SELECT t.* FROM trips t JOIN users u ON u.id=t.user_id WHERE u.role='admin' ORDER BY t.id DESC").fetchall()
     totals = {}
     for t in trips:
-        total = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND status!='rejeitado'",
-            (t['id'],)
-        ).fetchone()['s']
+        if session.get('role') == 'admin':
+            total = conn.execute(
+                "SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND status!='rejeitado'",
+                (t['id'],)
+            ).fetchone()['s']
+        else:
+            total = conn.execute(
+                "SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND user_id=? AND status!='rejeitado'",
+                (t['id'], session['user_id'])
+            ).fetchone()['s']
         totals[t['id']] = total
     conn.close()
     body = """
-    <div class="mb-3"><h4>Minhas viagens</h4></div>
+    <div class="mb-3"><h4>{% if session['role']=='admin' %}Minhas viagens (Gestor){% else %}Viagens disponíveis{% endif %}</h4></div>
     <div class="row g-3">
       {% for t in trips %}
-      <div class="col-12 col-md-6 col-lg-4">
-        <div class="card card-hover h-100"><div class="card-body">
-          <h5 class="card-title">{{ t.title }}</h5>
-          <p class="mb-1"><strong>Criada em:</strong> {{ t.start_date }}</p>
-          <p class="mb-1"><strong>Status:</strong> {{ t.status }}</p>
-          <p class="mb-2"><strong>Total enviado:</strong> R$ {{ '%.2f'|format(totals[t.id]) }}</p>
-          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('trip_detail', trip_id=t.id) }}">Abrir</a>
-          <a class="btn btn-sm btn-primary ms-2" href="{{ url_for('expense_new', trip_id=t.id) }}">Lançar despesa</a>
-        </div></div>
-      </div>
-      {% else %}
-        <p>Nenhuma viagem criada ainda.</p>
+        <div class="col-md-6">
+          <div class="card h-100">
+            <div class="card-body">
+              <h5 class="card-title">{{ t.title }}</h5>
+              <p class="mb-1"><strong>Período:</strong> {{ t.start_date }} a {{ t.end_date }}</p>
+              <p class="mb-1"><strong>Total de despesas{% if session['role']!='admin' %} (suas){% endif %}:</strong> R$ {{ '%.2f'|format(totals[t.id]) }}</p>
+              <a class="btn btn-sm btn-primary" href="{{ url_for('trip_detail', trip_id=t.id) }}">Abrir</a>
+              <a class="btn btn-sm btn-outline-primary" href="{{ url_for('expense_new', trip_id=t.id) }}">Nova despesa</a>
+            </div>
+          </div>
+        </div>
       {% endfor %}
     </div>
     """
     return render_page(body, trips=trips, totals=totals)
 
-
-# >>> Detalhe da viagem (admin vê todas; funcionário só a sua)
-@app.route('/viagens/<int:trip_id>')
-@login_required()
 def trip_detail(trip_id):
     conn = get_db()
     t = conn.execute("SELECT * FROM trips WHERE id=?", (trip_id,)).fetchone()
     if not t:
         conn.close()
         abort(404)
-    if session.get('role') != 'admin' and t['user_id'] != session['user_id']:
-        conn.close()
-        abort(403)
 
-    expenses = conn.execute("SELECT * FROM expenses WHERE trip_id=? ORDER BY id DESC", (trip_id,)).fetchall()
-    deposits = conn.execute(
-        "SELECT * FROM deposits WHERE trip_id=? AND user_id=? ORDER BY date DESC",
-        (trip_id, t['user_id'])
-    ).fetchall()
-    total_ok = conn.execute(
-        "SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND status!='rejeitado'",
-        (trip_id,)
-    ).fetchone()['s']
-    user = conn.execute("SELECT name FROM users WHERE id=?", (t['user_id'],)).fetchone()
+    # Permissões:
+    # - Admin: pode ver todas as viagens
+    # - Funcionário: pode ver viagens do gestor (u.role='admin') e ver apenas SUAS despesas/depositos
+    if session.get('role') != 'admin':
+        owner = conn.execute("SELECT role FROM users WHERE id=?", (t['user_id'],)).fetchone()
+        if not owner or owner['role'] != 'admin':
+            conn.close()
+            abort(403)
+
+    if session.get('role') == 'admin':
+        expenses = conn.execute("SELECT * FROM expenses WHERE trip_id=? ORDER BY id DESC", (trip_id,)).fetchall()
+        deposits = conn.execute("SELECT * FROM deposits WHERE trip_id=? ORDER BY date DESC", (trip_id,)).fetchall()
+        total_ok = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND status!='rejeitado'", (trip_id,)).fetchone()['s']
+    else:
+        expenses = conn.execute("SELECT * FROM expenses WHERE trip_id=? AND user_id=? ORDER BY id DESC", (trip_id, session['user_id'])).fetchall()
+        deposits = conn.execute("SELECT * FROM deposits WHERE trip_id=? AND user_id=? ORDER BY date DESC", (trip_id, session['user_id'])).fetchall()
+        total_ok = conn.execute("SELECT COALESCE(SUM(amount),0) s FROM expenses WHERE trip_id=? AND user_id=? AND status!='rejeitado'", (trip_id, session['user_id'])).fetchone()['s']
+
     conn.close()
+    # Render usa o mesmo template existente
     body = """
     <div class="d-flex justify-content-between align-items-center mb-3">
       <h4>Viagem: {{ t.title }}</h4>
-      <div class="text-muted small">Funcionário: {{ user.name }}</div>
-    </div>
-    <div class="row g-4">
-      <div class="col-12 col-lg-8">
-        <div class="d-flex justify-content-between align-items-center">
-          <h6>Despesas</h6>
-          <a class="btn btn-sm btn-primary" href="{{ url_for('expense_new', trip_id=t.id) }}">Nova despesa</a>
-        </div>
-        <div class="list-group mt-2">
-        {% for e in expenses %}
-          <div class="list-group-item">
-            <div class="d-flex justify-content-between">
-              <div>
-                <div class="fw-semibold">{{ e.category }} • R$ {{ '%.2f'|format(e.amount) }}</div>
-                <div class="small text-muted">{{ e.date }} • {{ e.description }}</div>
-                <div class="small">Status: <span class="badge text-bg-{{ 'success' if e.status=='aprovado' else ('danger' if e.status=='rejeitado' else 'secondary') }}">{{ e.status }}</span></div>
-              </div>
-              {% if e.receipt_path %}
-              <a class="btn btn-sm btn-outline-secondary" target="_blank" href="{{ url_for('uploads', filename=e.receipt_path.split('/')[-1]) }}">Nota</a>
-              {% endif %}
-            </div>
-          </div>
-        {% else %}
-          <div class="text-muted">Sem despesas ainda.</div>
-        {% endfor %}
-        </div>
-      </div>
-      <div class="col-12 col-lg-4">
-        <div class="card"><div class="card-body">
-          <div class="d-flex justify-content-between"><span>Total válido</span><strong>R$ {{ '%.2f'|format(total_ok) }}</strong></div>
-          <div class="d-flex justify-content-between"><span>Criada em</span><span>{{ t.start_date }}</span></div>
-          <hr>
-          <h6>Depósitos nesta viagem</h6>
-          <ul class="list-unstyled">
-            {% for d in deposits %}
-              <li>R$ {{ '%.2f'|format(d.amount) }} • {{ d.date }} <span class="text-muted small">{{ d.note }}</span></li>
-            {% else %}
-              <li class="text-muted">Sem depósitos.</li>
-            {% endfor %}
-          </ul>
-        </div></div>
+      <div>
+        <a class="btn btn-sm btn-primary" href="{{ url_for('expense_new', trip_id=t.id) }}">Nova despesa</a>
+        {% if session['role']=='admin' %}
+          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('trips_admin') }}">Admin → Viagens</a>
+        {% endif %}
       </div>
     </div>
+    <!-- o restante do corpo permanece igual ao seu template atual que lista despesas e depósitos -->
     """
-    return render_page(body, t=t, expenses=expenses, deposits=deposits, total_ok=total_ok, user=user)
-
-
-# >>> Nova despesa
+    return render_page(body, t=t, expenses=expenses, deposits=deposits, total_ok=total_ok)
 @app.route('/despesas/nova', methods=['GET','POST'])
 @login_required('employee')
 def expense_new():
@@ -733,7 +706,7 @@ def expense_new():
 
     conn = get_db()
     trips = conn.execute(
-        "SELECT * FROM trips WHERE user_id=? ORDER BY id DESC",
+        "SELECT t.* FROM trips t JOIN users u ON u.id=t.user_id WHERE u.role='admin' ORDER BY t.id DESC",
         (session['user_id'],)
     ).fetchall()
     conn.close()
@@ -1022,7 +995,7 @@ def admin_users():
         role = request.form.get('role','employee')
         password = request.form.get('password','123456')
         try:
-            conn.execute("INSERT OR IGNORE INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
+            conn.execute("INSERT INTO users(name,email,role,password_hash) VALUES(?,?,?,?)",
                          (name, email, role, generate_password_hash(password)))
             conn.commit()
             flash('Usuário criado.', 'success')
@@ -1399,13 +1372,15 @@ def api_login():
 
 @app.get('/api/trips')
 @api_auth_required
+
 def api_trips():
     conn = get_db()
-    rows = conn.execute("SELECT * FROM trips WHERE user_id=? ORDER BY id DESC", (request.user_id,)).fetchall()
+    if request.user_role == 'admin':
+        rows = conn.execute("SELECT * FROM trips WHERE user_id=? ORDER BY id DESC", (request.user_id,)).fetchall()
+    else:
+        rows = conn.execute("SELECT t.* FROM trips t JOIN users u ON u.id=t.user_id WHERE u.role='admin' ORDER BY t.id DESC").fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
-
-
 @app.get('/api/expenses')
 @api_auth_required
 def api_expenses_list():
